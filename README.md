@@ -1,0 +1,1 @@
+# bug-dotnet-publish-containerize-docker-auth
