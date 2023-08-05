@@ -65,3 +65,64 @@ I was then also able to reproduce the same error on a local Alpine Linux docker 
 # Reproduction steps
 
 # Work arounds
+### After `az acr login` manually change the `$HOME/.docker/config.json` and merge identitytoken and auth entries
+This is the approach I did and am keeping until a fix is in place. Maybe easier workarounds but I was still figuring out the issue. Perhaps Microsoft.NET.Build.Containers does super custom docker commaneds and doesn't support an identity token, only basic auth?
+
+- `az login` using **service principal or federated credentials**
+- `az acr login --name your-registry`, which creates the following docker auth config at `$HOME/.docker/config.json`. The `auth` is base64'd `00000000-0000-0000-0000-000000000000:`:
+   ```json
+   {
+        "auths": {
+                "your-registry.azurecr.io": {
+                        "auth": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAwOg==",
+                        "identitytoken": "REDACTED JWT"
+                }
+   }
+   ```
+- We then manually update `$HOME/.docker/config.json` and overrwrite `auths.[your-registry.azurecr.io].auth` and set it to the base64 of `00000000-0000-0000-0000-000000000000:REDACTED JWT`, and also remove the `identitytoken` element:
+   ```json
+   {
+        "auths": {
+                "your-registry.azurecr.io": {
+                        "auth": "<base 64 of '00000000-0000-0000-0000-000000000000:REDACTED JWT'>"
+                }
+   }
+   ```
+- We then proceed with dotnet publish using Microsoft.NET.Build.Containers and successfully push to ACR
+
+Here is the updated Github Actions workflow file to automate this process:
+- az login via federated credentials
+   ```yaml
+    - uses: azure/login@v1
+      name: Sign in to Azure
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+   ```
+- log into Azure Container Registry
+   ```yaml
+    - name: Login to ACR
+      run: |
+        az acr login --name <my-registry>
+   ```
+- (NEW!) adjust the docker auth file so we can successfuly push
+   ```yaml
+    - name: Update docker auth to circumvent docker/acr/Microsoft.NET.Build.Containers service principal login bug
+      env:
+        REGISTRY_URL: <my-registry>
+      run: |
+        JWT=$(jq -r '.auths."'$REGISTRY_URL'".identitytoken' "$HOME/.docker/config.json")
+        AUTH_STRING=$(echo -n "00000000-0000-0000-0000-000000000000:$JWT" | base64 | tr -d '\n')
+
+        jq '.auths."'$REGISTRY_URL'" |= . + {"auth": "'$AUTH_STRING'"} | del(.auths."'$REGISTRY_URL'".identitytoken)' "$HOME/.docker/config.json" > "$HOME/.docker/config.json.tmp"
+        mv "$HOME/.docker/config.json.tmp" "$HOME/.docker/config.json"
+   ```
+- publish image to ACR using Microsoft.NET.Build.Containers
+   ```yaml
+    - name: publish
+      run: dotnet publish ./my/path/to.csproj --os linux --arch x64 /t:PublishContainer -c Release
+   ```
+
+### don't use `az acr login` and log in directly to docker with a clientId and clientSecret (undesired security stature)
+### don't use Microsoft.NET.Build.Containers and generate the Dockerfile in source (not PROGRESSING) 
