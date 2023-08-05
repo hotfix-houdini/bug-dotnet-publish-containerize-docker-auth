@@ -55,7 +55,7 @@ In a GHA workflow, I had this process:
   ##[error]Process completed with exit code 1.
   ```
 
-I was then also able to reproduce the same error on a local Alpine Linux docker image logging in via clientId and clientSecret instead of federated credentials:
+I was then also able to reproduce the same error on a local Alpine Linux docker image and a host Windows OS logging in via clientId and clientSecret instead of federated credentials:
 - login to azure `az login --service-principal -u <clientId> -p <clientSecret> -t <azure ad tenant guid>`
 - login to acr `az acr login --name <my-registry>`
 - attempt to publish to acr `dotnet publish ./my/path/to.csproj --os linux --arch x64 /t:PublishContainer -c Release`
