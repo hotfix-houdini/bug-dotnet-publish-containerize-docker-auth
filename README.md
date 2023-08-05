@@ -1,6 +1,6 @@
 # WIP
 # Overview
-It appears that dotnet publish directly to a docker registry using Microsoft.NET.Build.Containers __fails with an unauthorized error if you log into docker in certain situations (such as when an identity token is used)__
+It appears that dotnet publish directly to a docker registry using Microsoft.NET.Build.Containers __fails with an unauthorized error if you log into docker in certain situations (such as when an identity token or credstore is used)__
 
 In a GHA workflow, I had this process:
 - az login via federated credentials
@@ -63,6 +63,92 @@ I was then also able to reproduce the same error on a local Alpine Linux docker 
 - received the exact same error
 
 # Reproduction steps
+Ran on Windows OS in Windows Powershell (terminal tool)
+### Prerequisite - creating an Azure Container Registry and service principal with permissions for pushing
+1. Have an Azure account
+2. Have Az CLI installed
+3. Have Docker CLI installed
+4. `az login`
+5. Make variables 
+   ```shell
+   $chars = 'abcdefghijklmnopqrstuvwxyz'
+   $RANDOM_SUFFIX = ''
+   for ($i = 0; $i -lt 15; $i++) {
+       $random = Get-Random -Minimum 0 -Maximum $chars.Length
+       $RANDOM_SUFFIX += $chars[$random]
+   }
+   $RESOURCE_GROUP_NAME = "acr-docker-dotnetcontainers-bug"
+   $ACR_NAME = "testacr$RANDOM_SUFFIX"
+   $SERVICE_PRINCIPAL_NAME = "acr-docker-dotnetcontainers-bug-user"
+   $LOCATION = "centralus"
+   $SUBSCRIPTION_ID = (az account show --query id --output tsv)
+   ```
+6. Create a poc resource group - `az group create --name $RESOURCE_GROUP_NAME --location $LOCATION`
+7. Create an ACR
+   ```shell
+   az acr create --name $ACR_NAME --resource-group $RESOURCE_GROUP_NAME --sku Basic --location $LOCATION
+   $ACR_ID=$(az acr show --name $ACR_NAME --query id --output tsv)
+   ```
+7. Create a service principal user that can log into azure for this resource group -
+   ```shell
+   $servicePrincipal = az ad sp create-for-rbac --name $SERVICE_PRINCIPAL_NAME --role Contributor --scopes /subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP_NAME
+   $appId = $servicePrincipal | ConvertFrom-Json | Select-Object -ExpandProperty appId
+   $password = $servicePrincipal | ConvertFrom-Json | Select-Object -ExpandProperty password
+   $tenant = $servicePrincipal | ConvertFrom-Json | Select-Object -ExpandProperty tenant
+   ```
+8. Grant push access to ACR - `az role assignment create --assignee $appId --scope $ACR_ID --role AcrPush`
+9. Output vars
+   ```shell
+   Write-Host "ACR Registry Name: $ACR_NAME.azurecr.io"
+   Write-Host "Service Principal ClientId: $appId"
+   Write-Host "Service Principal ClientSecret (Password): $password"
+   Write-Host "Service Principal Tenant (Password): $tenant"
+   ```
+10. Test credentials (login to azure, acr, and docker push a test image)
+   ```shell
+   az logout
+   az login --service-principal -u $appId -p $password -t $tenant
+   az acr login --name $ACR_NAME
+   docker pull hello-world
+   docker tag hello-world:latest "$ACR_NAME.azurecr.io/hello-world:latest"
+   docker push "$ACR_NAME.azurecr.io/hello-world:latest"
+   $images = az acr repository list --name $ACR_NAME --output tsv
+   if ($images -contains "hello-world") {
+       Write-Host "Image push to ACR was successful!"
+   } else {
+       Write-Host "Image push to ACR failed!"
+   }
+   ```
+11. We now have a service principal login and verified it's able to docker push to our ACR
+12. Cleanup (after observing the bug below) (az logout and az login as your original user)
+   ```shell
+   az group delete --name $RESOURCE_GROUP_NAME --yes --no-wait
+   az ad sp delete --id $appId
+   ```
+
+### Reproduce the bug by attempting to push to ACR through Microsoft.NET.Build.Containers
+We'll follow https://learn.microsoft.com/en-us/dotnet/core/docker/publish-as-container
+
+1. Az CLI installed
+2. Have Docker installed and Daemon running
+3. Have .NET 7+ SDK installed
+4. Navigate to a directory suitable for a new .NET project
+5. Create the .NET project 
+   ```shell
+   dotnet new worker -o Worker -n DotNet.ContainerImage
+   cd .\Worker\
+   dotnet add package Microsoft.NET.Build.Containers
+   ```
+6. Test and verify success of the Microsoft.NET.Build.Containers publish to your local docker daemon - `dotnet publish --os linux --arch x64 /t:PublishContainer -c Release`
+7. Ensure you're logged into ACR (see **Prerequisite - creating an Azure Container Registry and service principal with permissions for pushing**)
+8. Open `DotNet.ContainerImage.csproj` and add your registry to the csproj to push to ACR instead of local docker daemon (run `Write-Host "ACR Registry Name: $ACR_NAME.azurecr.io"` from above):
+   ```xml
+   <PropertyGroup>
+      <ContainerRegistry><registry>.azurecr.io</ContainerRegistry>
+   </PropertyGroup>
+   ```
+9. Repush and observe the bug - `dotnet publish --os linux --arch x64 /t:PublishContainer -c Release` - `error CONTAINER1013: Failed to push to the output registry: System.Net.Http.HttpRequestException: Response status code does not indicate success: 401 (Unauthorized)`
+10. (repeat from prerequisites) Double check that we CAN push to ACR bypassing Microsoft.NET.Build.Containers by using docker directly - `docker push "$ACR_NAME.azurecr.io/hello-world:latest"`
 
 # Work arounds
 ### After `az acr login` manually change the `$HOME/.docker/config.json` and merge identitytoken and auth entries
