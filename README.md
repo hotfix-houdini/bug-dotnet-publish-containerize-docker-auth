@@ -1,6 +1,5 @@
-# WIP
 # Overview
-It appears that dotnet publish directly to a docker registry using Microsoft.NET.Build.Containers __fails with an unauthorized error if you log into docker in certain situations (such as when an identity token or credstore is used)__
+It appears that dotnet publish directly to a docker registry using Microsoft.NET.Build.Containers __fails with an unauthorized error if you log into docker in certain situations (such as when an identity token or credstore is used with an Azure Container Registry)__
 
 In a GHA workflow, I had this process:
 - az login via federated credentials
